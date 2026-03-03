@@ -1,13 +1,15 @@
+#!/usr/bin/env python3
+
 import sys, os, re, time
 from netrc import netrc
-from email.Message import Message
+from email.message import EmailMessage
 from email.utils import make_msgid
 from twisted.news.nntp import NNTPClient
 from twisted.internet import ssl, reactor, defer
 from twisted.internet.protocol import ClientFactory
 
 if len(sys.argv) < 5:
-    sys.stderr.write("Usage: %s <from> <groups> <subject> <file1.ync> [file2.ync ...]\n" % sys.argv[0])
+    sys.stderr.write(f"Usage: {sys.argv[0]} <from> <groups> <subject> <file1.ync> [file2.ync ...]\n")
     sys.stderr.write("""
 The server comes from NNTPSERVER environment variable and
 authentication information should be stored in ~/.netrc.
@@ -19,8 +21,8 @@ The subject will be automatically extended with file information.
 """)
     sys.exit(1)
 
-re_file_multi = re.compile(r'^=ybegin part=(?P<part>[0-9]+) total=(?P<total>[0-9]+) line=[0-9]+ size=(?P<size>[0-9]+) name=(?P<name>.*?)\s*$')
-re_file_single = re.compile(r'^=ybegin line=[0-9]+ size=(?P<size>[0-9]+) name=(?P<name>.*?)\s*$')
+re_file_multi = re.compile(br'^=ybegin part=(?P<part>[0-9]+) total=(?P<total>[0-9]+) line=[0-9]+ size=(?P<size>[0-9]+) name=(?P<name>.*?)\s*$')
+re_file_single = re.compile(br'^=ybegin line=[0-9]+ size=(?P<size>[0-9]+) name=(?P<name>.*?)\s*$')
 messages = {}
 fromaddr = sys.argv[1].strip()
 groups = [newsgroup.strip() for newsgroup in sys.argv[2].split(',')]
@@ -35,39 +37,39 @@ if ':' in nntpserver:
     nntpport = int(nntpport)
 nntpuser, _, nntppass = netrc().authenticators(nntpserver) or (None, None, None)
 
-print "Process yEnc files"
+print("Process yEnc files")
 for yncfile in file_list:
     if not os.access(yncfile, os.R_OK):
-        raise RuntimeError("ERROR: file %s is not readable" % repr(yncfile))
-    with open(yncfile) as fd:
+        raise RuntimeError(f"ERROR: file {yncfile!r} is not readable")
+    with open(yncfile, "rb") as fd:
         ync_line = fd.readline().strip()
     ma_file = re_file_multi.match(ync_line) or re_file_single.match(ync_line)
     if not ma_file:
-        raise RuntimeError("ERROR: file %s does not seem to be yEnc file" % repr(yncfile))
+        raise RuntimeError(f"ERROR: file {yncfile!r} does not seem to be yEnc file")
     ma_file = ma_file.groupdict()
-    part = int(ma_file.get('part', 1))
-    total = int(ma_file.get('total', 1))
-    size = int(ma_file['size'])
-    name = ma_file['name']
+    part = int(ma_file.get(b'part', 1))
+    total = int(ma_file.get(b'total', 1))
+    size = int(ma_file[b'size'])
+    name = ma_file[b'name'].decode()
     if name in messages:
         curparts, curtotal, curcount = messages[name]
         if curtotal != total or part in curparts:
-            raise RuntimeError("ERROR: inconsistency with file %s" % repr(yncfile))
+            raise RuntimeError(f"ERROR: inconsistency with file {yncfile!r}")
         curparts.append([part, None, yncfile, size])
     else:
         messages[name] = ([[part, None, yncfile, size]], total, filecount)
         filecount = filecount + 1
-    print "...processed file", yncfile
+    print(f"...processed file {yncfile}")
 filecount -= 1
 
-print "Check parts and generate subjects"
+print("Check parts and generate subjects")
 for name, value in messages.items():
     parts, total, curfile = value
     lastpart = 0
     parts.sort()
     for part in parts:
         if part[0] != lastpart + 1:
-            raise RuntimeError("ERROR: part %d for file %s not exist" % (lastpart + 1, name))
+            raise RuntimeError(f"ERROR: part {lastpart + 1} for file {name} not exist")
         lastpart += 1
         part[1] = subject % {
             'part'  : part[0],
@@ -77,25 +79,25 @@ for name, value in messages.items():
             'files' : filecount,
             'size'  : part[3],
         }
-    print "...processed file", name
+    print(f"...processed file {name}")
 
 def postFilesGenerator():
-    print "Post %d files in parts" % len(messages)
+    print(f"Post {len(messages)} files in parts")
     for name, value in messages.items():
         parts, total, curfile = value
-        print "...post file", curfile
+        print(f"...post file {curfile}")
         for num, subj, fname, size in parts:
-            with open(fname) as src:
-                lines = len(src.readlines())
-            with open(fname) as src:
-                bytecount = len(src.read())
-            print "....%s" % subj
+            print(f"....{subj}")
+            with open(fname, "rb") as src:
+                msgdata = src.read()
+            lines = msgdata.count(b'\n') + 1
+            bytecount = len(msgdata)
+            
             msgid = make_msgid()
             msgid = re.sub(r'@.*>$', '@notexists.local>', msgid)
-            msgid = msgid.replace('<', '<Part%dof%d.' % (num, total))            
-            with open(fname) as src:
-                msgdata = src.read()
-            msg = Message()
+            msgid = msgid.replace('<', f'<Part{num}of{total}.')
+            
+            msg = EmailMessage()
             msg["From"] = fromaddr
             msg["Subject"] = subj
             msg["User-Agent"] = "postfiles.py (http://sourceforge.net/projects/nntp2nntp/)"
@@ -105,54 +107,56 @@ def postFilesGenerator():
             msg["Lines"] = str(lines)
             msg["Bytes"] = str(bytecount)
             msg.set_payload(msgdata)
-            yield msg.as_string()
-        print "...processed file", name
+            yield msg.as_bytes()
+        print(f"...processed file {name}")
 
 
 class PosterClient(NNTPClient):
     def __init__(self, postparts):
-        NNTPClient.__init__(self)
+        super().__init__()
         self._postparts = postparts
 
     def quit(self):
-        NNTPClient.quit(self)
+        super().quit()
         reactor.stop()
 
     def failed(self, message, error):
-        print message + ":", error
+        print(f"{message}: {error}")
         self.quit()
+    
     postFailed = lambda s, e: s.failed("Posting failed", e)
     authFailed = lambda s, e: s.failed("Auth failed", e)
 
-    def _headerInitial(self, (code, message)):
-        NNTPClient._headerInitial(self, (code, message))
-        if nntpuser != None:
-            self.sendLine('AUTHINFO USER ' + nntpuser)
-            self._newState(None, self.authFailed, self.authUserOk)
-        else: self.postArticle(self._postparts.next())
+    def connectionMade(self):
+        super().connectionMade()
+        if nntpuser:
+            self.sendCommand(b'AUTHINFO USER ' + nntpuser.encode())
+            self.deferred.addCallbacks(self.authUserOk, self.authFailed)
+        else:
+            self.postArticle(next(self._postparts))
 
-    def authUserOk(self, (code, message)):
-        if code != 381: self.authFailed(error)
-        self._endState()
-        self.sendLine('AUTHINFO PASS ' + nntppass)
-        self._newState(None, self.authFailed, self.authPassOk)
+    def authUserOk(self, result):
+        self.sendCommand(b'AUTHINFO PASS ' + nntppass.encode())
+        self.deferred.addCallbacks(self.authPassOk, self.authFailed)
+        return result
 
-    def authPassOk(self, (code, message)):
-        if code != 281: self.authFailed(error)
-        self._endState()
-        data = self._postparts.next()
-        self.postArticle(data)
+    def authPassOk(self, result):
+        self.postArticle(next(self._postparts))
+        return result
 
-    def postedOk(self):
-        try: self.postArticle(self._postparts.next())
-        except StopIteration: self.quit()
+    def articlePosted(self, result):
+        try:
+            self.postArticle(next(self._postparts))
+        except StopIteration:
+            self.quit()
+        return result
 
 class PosterFactory(ClientFactory):
     def buildProtocol(self, addr):
         return PosterClient(postFilesGenerator())
 
-print "Connect to server", nntpserver
+print(f"Connect to server {nntpserver}")
 factory = PosterFactory()
-reactor.connectSSL(nntpserver, nntpport, PosterFactory(), ssl.CertificateOptions())
+reactor.connectSSL(nntpserver, nntpport, factory, ssl.CertificateOptions())
 reactor.run()
-print "All files successfully posted."
+print("All files successfully posted.")

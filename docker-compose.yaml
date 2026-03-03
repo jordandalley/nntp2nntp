@@ -1,0 +1,10 @@
+services:
+  nntp2nntp:
+    build: .
+    container_name: nntp2nntp
+    env_file:
+      - .env
+    volumes:
+      - ./config:/config
+    network_mode: host
+    restart: unless-stopped
