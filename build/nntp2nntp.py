@@ -16,7 +16,7 @@ SERVER_PORT = int(os.getenv('SERVER_PORT', 563))
 SERVER_SSL = os.getenv('SERVER_SSL', 'false').lower() == 'true'
 SERVER_USER = os.getenv('SERVER_USER', '')
 SERVER_PASS = os.getenv('SERVER_PASS', '')
-SERVER_CONNECTIONS = int(os.getenv('SERVER_MAXCONN', 20))
+SERVER_CONNECTIONS = int(os.getenv('SERVER_CONNECTIONS', 20))
 PROXY_SSL = os.getenv('PROXY_SSL', 'false').lower() == 'true'
 PROXY_PORT = int(os.getenv('PROXY_PORT', 15630)) 
 PROXY_CERT_PEM = os.getenv('PROXY_CERT_PEM', '')
