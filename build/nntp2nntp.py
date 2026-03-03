@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import sys, os, time
+import sys, os, time, socket
 import json
 from hashlib import sha256
 from OpenSSL.SSL import VERIFY_PEER, VERIFY_FAIL_IF_NO_PEER_CERT
@@ -14,6 +14,7 @@ from threading import Lock
 SERVER_HOST = os.getenv('SERVER_HOST', '')
 SERVER_PORT = int(os.getenv('SERVER_PORT', 563))
 SERVER_SSL = os.getenv('SERVER_SSL', 'false').lower() == 'true'
+SERVER_CIPHER = os.getenv('SERVER_CIPHER', 'AES128-SHA')
 SERVER_USER = os.getenv('SERVER_USER', '')
 SERVER_PASS = os.getenv('SERVER_PASS', '')
 SERVER_CONNECTIONS = int(os.getenv('SERVER_CONNECTIONS', 20))
@@ -49,6 +50,14 @@ connection_manager = ConnectionManager()
 log.startLogging(sys.stdout)
 Factory.noisy = False
 
+class CustomClientContextFactory(ssl.ClientContextFactory):
+  def __init__(self, ciphers):
+    self.ciphers = ciphers
+  def getContext(self):
+    context = ssl.ClientContextFactory.getContext(self)
+    context.set_cipher_list(self.ciphers)
+    return context
+
 class NNTPProxyServer(LineReceiver):
   clientFactory = None
   client = None
@@ -60,11 +69,13 @@ class NNTPProxyServer(LineReceiver):
     client = self.clientFactory()
     client.server = self
     if SERVER_SSL:
-      reactor.connectSSL(SERVER_HOST, SERVER_PORT, client, ssl.ClientContextFactory())
+      if SERVER_CIPHER:
+        context_factory = CustomClientContextFactory(SERVER_CIPHER.encode())
+      else:
+        context_factory = ssl.ClientContextFactory()
+      reactor.connectSSL(SERVER_HOST, SERVER_PORT, client, context_factory)
     else:
       reactor.connectTCP(SERVER_HOST, SERVER_PORT, client)
-    self.downloaded_bytes = 0
-    self.uploaded_bytes = 0
     self.conn_time = time.time()
 
   def connectionLost(self, reason):
@@ -72,7 +83,10 @@ class NNTPProxyServer(LineReceiver):
 	    self.client.transport.loseConnection()
     if self.auth_user:
       connection_manager.remove_connection(self.auth_user)
-      log.msg(f'user {self.auth_user!r} disconnected: duration {int(time.time() - self.conn_time)}, downloaded {self.downloaded_bytes}, uploaded {self.uploaded_bytes}')
+      log.msg(f'user {self.auth_user!r} disconnected: duration {int(time.time() - self.conn_time)}')
+
+  def rawDataReceived(self, data):
+    self.client.transport.write(data)
 
   def lineReceived(self, line):
     if not self.authenticated:
@@ -107,6 +121,13 @@ class NNTPProxyServer(LineReceiver):
             if SERVER_PASS:
               self.client.sendLine(f'AUTHINFO PASS {SERVER_PASS}'.encode())
             log.msg(f"{self.auth_user!r} successfully logged in ({user_conns} connections)")
+            
+            # Switch to raw mode for performance
+            self.client.switchToRawMode()
+            leftovers = self.setRawMode()
+            if leftovers:
+                self.client.transport.write(leftovers)
+            return
           else:
             self.sendLine(b'481 Authentication failed')
             self.transport.loseConnection()
@@ -114,10 +135,8 @@ class NNTPProxyServer(LineReceiver):
           self.sendLine(b'501 Syntax error in command')
           self.transport.loseConnection()
       else:
-        self.uploaded_bytes += len(line)
         self.client.sendLine(line)
     else:
-      self.uploaded_bytes += len(line)
       self.client.sendLine(line)
 
 class NNTPProxyClient(LineReceiver):
@@ -132,8 +151,15 @@ class NNTPProxyClient(LineReceiver):
 	    self.server.transport.loseConnection()
 
   def lineReceived(self, line):
-    self.server.downloaded_bytes += len(line)
     self.server.sendLine(line)
+
+  def rawDataReceived(self, data):
+    self.server.transport.write(data)
+
+  def switchToRawMode(self):
+    leftovers = self.setRawMode()
+    if leftovers:
+      self.server.transport.write(leftovers)
 
 class NNTPProxyClientFactory(ClientFactory):
   server = None
